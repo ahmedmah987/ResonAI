@@ -39,7 +39,10 @@ By using a fixed embedding model \(E\) (via OpenRouter), we treat agents as blac
 
 ## 🎥 Demo Video
 Watch the **Resonance Monitor** in action:
-![Demo Video](docs/assets/demo_video.mp4)
+
+<video src="docs/assets/demo_video.mp4" controls="controls" style="max-width: 100%;">
+  Your browser does not support the video tag.
+</video>
 
 ---
 
