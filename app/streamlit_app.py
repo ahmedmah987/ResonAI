@@ -18,8 +18,21 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from prmp_demo.config import load_config
+from prmp_demo.environment.task_protocol import parse_discussion_output, parse_model_output
 from prmp_demo.run_session import run_session_gen
 from dataclasses import replace
+
+
+def _display_rationale(text: str, limit: int = 400, *, open_discussion: bool = False) -> str:
+    """Show human-readable rationale (unwrap JSON if the model echoed the schema)."""
+    if not text:
+        return ""
+    parser = parse_discussion_output if open_discussion else parse_model_output
+    parsed, _ = parser(text)
+    stripped = (parsed.rationale or text).strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[:limit] + "…"
 
 # Popular OpenRouter models for the dropdown
 CHAT_MODELS = [
@@ -144,7 +157,12 @@ def main() -> None:
             embed_m = st.selectbox("Embedding Model (Observer)", EMBED_MODELS, index=EMBED_MODELS.index(cfg.embedding_model) if cfg.embedding_model in EMBED_MODELS else 0)
             
             st.divider()
-            scenario = st.selectbox("Scenario", ["silent_resonance", "conflicting_objectives", "trivial_correlation"])
+            scenario = st.selectbox("Scenario", ["silent_resonance", "conflicting_objectives", "trivial_correlation", "open_discussion"])
+            
+            custom_topic = ""
+            if scenario == "open_discussion":
+                custom_topic = st.text_input("Discussion Topic", value="The future of autonomous coordination and topological resonance")
+            
             max_steps = st.number_input("Max Steps", min_value=1, max_value=50, value=cfg.max_steps or 10)
             dry_run = st.checkbox("Dry Run (Simulation)", value=not bool(api_key))
             start_btn = st.button("🚀 Start Live Session")
@@ -193,7 +211,8 @@ def main() -> None:
                     scenario=scenario,
                     cfg=cfg,
                     dry_parse_only=dry_run,
-                    max_steps_override=int(max_steps)
+                    max_steps_override=int(max_steps),
+                    topic=custom_topic if scenario == "open_discussion" else None
                 ):
                     st.session_state.live_steps.append(step)
                     
@@ -239,13 +258,14 @@ def main() -> None:
                         trajectory_placeholder.scatter_chart(traj_df, x="Z1", y="Z2", color="Agent", size="Step")
 
                     # Live Chat Log
+                    is_open = scenario == "open_discussion"
                     with log_container:
                         with st.chat_message("assistant", avatar="🤖"):
                             st.write(f"**Step {step['t']}** | Agent A: `{step['parsed_action_a']['action_id']}`")
-                            st.caption(step['parsed_action_a']['rationale'][:200] + "...")
+                            st.caption(_display_rationale(step["parsed_action_a"]["rationale"], open_discussion=is_open))
                         with st.chat_message("user", avatar="👤"):
                             st.write(f"**Step {step['t']}** | Agent B: `{step['parsed_action_b']['action_id']}`")
-                            st.caption(step['parsed_action_b']['rationale'][:200] + "...")
+                            st.caption(_display_rationale(step["parsed_action_b"]["rationale"], open_discussion=is_open))
                 
                 st.success("MONITORING COMPLETE: Resonance session finalized.")
                 st.session_state.live_meta["status"] = "completed"

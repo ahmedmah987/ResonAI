@@ -20,8 +20,11 @@ graph TD
     B[Agent B] -->|Text Output| O
     O -->|Vectors| P[Manifold Alignment PCA/UMAP]
     P -->|Latent Z| R[Resonance Pipeline]
+    R -->|Gamma t| DEC[Decision Layer]
     R -->|Gamma t| D[Resonance Monitor Dashboard]
     R -->|Metrics| S[Stability & Falsification Analysis]
+    DEC -->|Redirect Hint| A
+    DEC -->|Redirect Hint| B
 ```
 
 ### 📐 Mathematical Foundation
@@ -36,6 +39,27 @@ Where:
 
 ### Shared Embedding Observer
 By using a fixed embedding model \(E\) (via OpenRouter), we treat agents as black boxes and focus purely on the geometry of their observable "trajectories."
+
+### Decision Layer
+After each step, \(\vec{\Gamma}(t)\) is evaluated by `decision.py` to produce an **actionable signal** for any downstream orchestrator:
+
+| Signal | Condition | Meaning |
+|:---|:---|:---|
+| `CONTINUE` | Metrics healthy | Keep going, no intervention needed. |
+| `REDIRECT_A` | Grassmann < 0.15 | Agent A is drifting from the shared subspace. |
+| `REDIRECT_B` | Grassmann < 0.15 | Agent B is drifting from the shared subspace. |
+| `SOFT_RESET` | R_spec < 0.75 | Rhythm has broken down — inject a re-framing prompt. |
+| `MERGE` | R_spec > 0.95, W_p > 0.70, Grassmann > 0.35 | Agents have converged — can be treated as a single node. |
+
+In `open_discussion` sessions, redirect signals are **automatically applied** to the next step: the drifting agent receives a prompt hint to re-anchor to the other agent's core argument. This closes the measurement-to-action loop without external intervention.
+
+Each step record in the output JSONL includes:
+```json
+{
+  "decision": {"action": "REDIRECT_B", "reason": "grassmann_low", "confidence": 0.14},
+  "redirect_applied": {"A": null, "B": "Re-anchor your response to the other agent's core argument..."}
+}
+```
 
 ## 🎥 Demo Video
 Watch the **Resonance Monitor** in action:
@@ -69,10 +93,11 @@ The framework distinguishes between different interaction modes by analyzing the
 
 ## 📂 Repository Structure
 
-| Directory | Purpose |
-|-----------|---------|
+| Directory / File | Purpose |
+|-----------------|---------|
 | **`src/prmp_demo/`** | Core engine for session execution and metric computation. |
-| **`app/`** | Streamlit dashboard for visual replay and "tension" analysis. |
+| **`src/prmp_demo/decision.py`** | Decision layer: translates \(\vec{\Gamma}(t)\) into actionable signals (CONTINUE / REDIRECT / SOFT_RESET / MERGE). |
+| **`app/`** | Streamlit dashboard for visual replay and live session monitoring. |
 | **`docs/`** | Detailed theory, plan, and falsification criteria. |
 | **`samples/`** | **Fixtures**: Pre-generated sessions (Trivial, Silent, Conflicting) to explore the UI immediately. |
 | **`scripts/`** | Utility scripts for model discovery and fixture generation. |
@@ -92,15 +117,15 @@ source .venv/bin/activate  # Unix/macOS
 
 ### 2. Install Dependencies
 ```bash
-pip install -r github/requirements.txt
-pip install -e ./github
+pip install -r requirements.txt
+pip install -e .
 ```
-*For the full theory stack (UMAP, TDA), use:* `pip install -e "./github[full]"`
+*For the full theory stack (UMAP, TDA), use:* `pip install -e ".[full]"`
 
 ### 3. Configuration
 Copy the example environment file and add your [OpenRouter](https://openrouter.ai/) API key:
 ```bash
-copy github\.env.example private\.env
+copy .env.example ..\..\private\.env
 ```
 
 ---
@@ -111,19 +136,19 @@ copy github\.env.example private\.env
 Generate a new interaction between agents under specific scenarios:
 ```bash
 # High correlation scenario
-python -m prmp_demo.run_session --scenario silent_resonance --out private/sessions/resonance_test.jsonl
+python -m prmp_demo.run_session --scenario silent_resonance --out ../../private/sessions/resonance_test.jsonl
 ```
 
 ### Analyze & Recompute Metrics
 Re-run the pipeline offline to compute stability metrics:
 ```bash
-python -m prmp_demo.analyze_session --in private/sessions/resonance_test.jsonl --out private/sessions/analyzed.jsonl
+python -m prmp_demo.analyze_session --in ../../private/sessions/resonance_test.jsonl --out ../../private/sessions/analyzed.jsonl
 ```
 
 ### Visual Replay & Live Resonance Monitor (Streamlit)
 Launch the professional **Resonance Monitor** to inspect \(\vec{\Gamma}(t)\) or run a live session:
 ```bash
-streamlit run github/app/streamlit_app.py
+streamlit run app/streamlit_app.py
 ```
 *Features:*
 - **Real-time Dashboard**: Live metrics with delta tracking for spectral, topological, and subspace coherence.

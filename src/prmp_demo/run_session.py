@@ -7,7 +7,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import numpy as np
 
@@ -15,12 +15,15 @@ from prmp_demo import agents
 from prmp_demo.config import DemoConfig, config_snapshot, load_config
 from prmp_demo.environment.task_protocol import (
     ScenarioId,
+    append_history_turn,
     apply_actions_sequential,
     expected_action_conflicting,
     expected_action_for_step,
     initial_state,
+    parse_discussion_output,
     parse_model_output,
 )
+from prmp_demo.decision import evaluate as evaluate_decision, Decision
 from prmp_demo.gamma import compute_metrics_prefix
 from prmp_demo.observer import apply_h
 from prmp_demo.openrouter_client import (
@@ -68,7 +71,7 @@ def pseudo_embedding(text: str, dim: int = 64) -> list[float]:
     return rng.standard_normal(dim).tolist()
 
 
-def simulate_chat(cfg: DemoConfig, scenario: ScenarioId, agent_label: str, state: dict[str, Any]) -> tuple[str, None]:
+def simulate_chat(cfg: DemoConfig, scenario: ScenarioId, agent_label: str, state: dict[str, Any], topic: Optional[str] = None) -> tuple[str, None]:
     import json as json_lib
 
     if scenario == "trivial_correlation":
@@ -82,6 +85,16 @@ def simulate_chat(cfg: DemoConfig, scenario: ScenarioId, agent_label: str, state
             "action_id": exp,
             "rationale": f"Conflict-{agent_label}-step-{state.get('step_index')}-{seed_variant(agent_label, state)}",
         }
+    elif scenario == "open_discussion":
+        step = state.get("step_index", 0)
+        if agent_label == "B" and state.get("history"):
+            last = state["history"][-1]["rationale"][:120]
+            msg = f"On your point about {last}… I see a link to decentralized synchronization via sheaf-based consensus."
+        else:
+            msg = (
+                f"Step {step}: autonomous coordination may need topological invariants, not just pairwise messaging."
+            )
+        return msg, None
     else:
         exp = expected_action_for_step(scenario, state.get("step_index", 0))
         payload = {
@@ -95,14 +108,17 @@ def seed_variant(agent_label: str, state: dict[str, Any]) -> int:
     return (hash(agent_label) ^ hash(state.get("step_index", 0))) % 10_000
 
 
-def run_live_chat(cfg: DemoConfig, scenario: ScenarioId, agent_label: str, model: str, state: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-    messages = agents.message_payload(agent_label, state, scenario)
+def run_live_chat(cfg: DemoConfig, scenario: ScenarioId, agent_label: str, model: str, state: dict[str, Any], topic: Optional[str] = None, redirect_hint: Optional[str] = None) -> tuple[str, dict[str, Any] | None]:
+    topic = topic or state.get("topic")
+    messages = agents.message_payload(agent_label, state, scenario, topic=topic, redirect_hint=redirect_hint)
+    max_tokens = max(cfg.max_tokens, 768) if scenario == "open_discussion" else cfg.max_tokens
+    temperature = min(cfg.temperature, 0.35) if scenario == "open_discussion" else cfg.temperature
     body, _status = post_chat(
         cfg.openrouter_api_key or "",
         model=model,
         messages=messages,
-        max_tokens=cfg.max_tokens,
-        temperature=cfg.temperature,
+        max_tokens=max_tokens,
+        temperature=temperature,
         http_referer=cfg.http_referer,
         http_title=cfg.http_title,
     )
@@ -144,26 +160,52 @@ def run_session_gen(
     cfg: DemoConfig,
     dry_parse_only: bool,
     max_steps_override: int | None,
+    topic: Optional[str] = None,
 ) -> Iterator[dict[str, Any]]:
     max_steps = max_steps_override if max_steps_override is not None else cfg.max_steps
 
     state = initial_state(scenario)
+    if topic:
+        state["topic"] = topic
     hist_a: list[list[float]] = []
     hist_b: list[list[float]] = []
+    prev_decision: dict[str, Any] | None = None
 
     for t in range(max_steps):
         errors_step: list[str] = []
 
-        def chat_fn(agent_label: str, model: str) -> tuple[str, dict[str, Any] | None]:
+        # Derive redirect hints from previous step's decision
+        hint_a: str | None = None
+        hint_b: str | None = None
+        if prev_decision and scenario == "open_discussion":
+            action: str = prev_decision.get("action", "CONTINUE")
+            if action == "REDIRECT_A":
+                hint_a = "Re-anchor your response to the other agent's core argument before adding new ideas."
+            elif action == "REDIRECT_B":
+                hint_b = "Re-anchor your response to the other agent's core argument before adding new ideas."
+            elif action == "SOFT_RESET":
+                hint_a = "Start a fresh angle on the main topic rather than continuing the current thread."
+                hint_b = "Start a fresh angle on the main topic rather than continuing the current thread."
+
+        def chat_fn(agent_label: str, model: str, current_state: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+            hint = hint_a if agent_label == "A" else hint_b
             if dry_parse_only:
-                return simulate_chat(cfg, scenario, agent_label, state)
-            return run_live_chat(cfg, scenario, agent_label, model, state)
+                return simulate_chat(cfg, scenario, agent_label, current_state, topic=topic)
+            return run_live_chat(cfg, scenario, agent_label, model, current_state, topic=topic, redirect_hint=hint)
 
-        raw_a, usa = chat_fn("A", cfg.chat_model_a)
-        raw_b, usb = chat_fn("B", cfg.chat_model_b)
+        # Agent A turn
+        parse_fn = parse_discussion_output if scenario == "open_discussion" else parse_model_output
 
-        pa, ok_a = parse_model_output(raw_a)
-        pb, ok_b = parse_model_output(raw_b)
+        raw_a, usa = chat_fn("A", cfg.chat_model_a, state)
+        pa, ok_a = parse_fn(raw_a)
+
+        if scenario == "open_discussion":
+            state_for_b = append_history_turn(state, "A", pa)
+            raw_b, usb = chat_fn("B", cfg.chat_model_b, state_for_b)
+        else:
+            raw_b, usb = chat_fn("B", cfg.chat_model_b, state)
+
+        pb, ok_b = parse_fn(raw_b)
 
         ta = apply_h(pa, "A", cfg)
         tb = apply_h(pb, "B", cfg)
@@ -184,8 +226,11 @@ def run_session_gen(
 
         metrics = compute_metrics_prefix(hist_a, hist_b, cfg=cfg)
 
+        current_decision = evaluate_decision(metrics)
         step_record = {
             "t": t,
+            "decision": current_decision,
+            "redirect_applied": {"A": hint_a, "B": hint_b},
             "state_before": state_before,
             "state_after": state_after,
             "raw_text_a": raw_a,
@@ -206,6 +251,7 @@ def run_session_gen(
             "metrics": metrics,
         }
         yield step_record
+        prev_decision = current_decision
         state = state_after
 
 
